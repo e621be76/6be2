@@ -1,0 +1,28 @@
+# k3s ships Traefik as 1 replica with no PDB: a spot reclaim of its node takes down all ingress
+# (found by 25-reclaim-drill.sh). HelmChartConfig overrides the values of the bundled chart (traefik 40.1.x)
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    deployment:
+      replicas: 2
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+    ports:
+      web:
+        transport:
+          lifeCycle:
+            # keep accepting while the endpoint removal propagates, then drain
+            requestAcceptGraceTimeout: 5s
+            graceTimeOut: 10s

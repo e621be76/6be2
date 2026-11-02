@@ -1,0 +1,109 @@
+# Two pools with identical shape, only capacity type and weight differ: Karpenter tries the
+# higher-weight spot pool first and falls back to on-demand when spot capacity is unavailable (ICE)
+# Karpenter v1 API (karpenter.sh/v1), checked against the v1.15.1 CRDs
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-spot
+spec:
+  weight: 100
+  template:
+    metadata:
+      labels:
+        acme.io/node-type: gpu
+        acme.io/capacity: spot
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: karpenter.k8s.aws/instance-gpu-manufacturer
+          operator: In
+          values: [nvidia]
+        # wide set of families/sizes = more spot pools to draw from = fewer interruptions
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [g5, g6, g6e]
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1", "4"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+      # hard stop for draining a node: in-flight requests get up to 15m once disruption starts
+      terminationGracePeriod: 15m
+      expireAfter: 720h
+  disruption:
+    # never bin-pack a GPU node that still runs inference; only reclaim nodes with no pods left
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+    budgets:
+      - nodes: "10%"
+      # no voluntary disruption (drift/expiry) during business hours; spot interruptions still happen
+      - nodes: "0"
+        schedule: "0 8 * * mon-fri"
+        duration: 10h
+  limits:
+    nvidia.com/gpu: "16"
+    cpu: "256"
+    memory: 1024Gi
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-on-demand
+spec:
+  weight: 10
+  template:
+    metadata:
+      labels:
+        acme.io/node-type: gpu
+        acme.io/capacity: on-demand
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: karpenter.k8s.aws/instance-gpu-manufacturer
+          operator: In
+          values: [nvidia]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [g5, g6, g6e]
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1", "4"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+      terminationGracePeriod: 15m
+      expireAfter: 720h
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+    budgets:
+      - nodes: "10%"
+      - nodes: "0"
+        schedule: "0 8 * * mon-fri"
+        duration: 10h
+  # smaller cap: on-demand GPUs are the expensive fallback, a runaway here costs real money
+  limits:
+    nvidia.com/gpu: "8"
+    cpu: "128"
+    memory: 512Gi

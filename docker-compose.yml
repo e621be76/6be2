@@ -1,0 +1,25 @@
+# fixed project name so the network name below doesn't depend on the clone directory
+name: quote
+
+services:
+  toolbox:
+    build: ./toolbox
+    image: quote-toolbox:local
+    container_name: quote-toolbox
+    environment:
+      HOST_PORT: ${HOST_PORT:-8080}
+    volumes:
+      # k3d creates the cluster nodes as sibling containers on the host docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/work
+    networks: [k3d]
+    command: ["/work/scripts/00-cluster.sh", "--serve"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/bootstrap-done"]
+      interval: 10s
+      start_period: 300s
+
+networks:
+  # k3d joins this network so the toolbox can reach the API via the k3d-quote-serverlb name
+  k3d:
+    name: k3d-quote

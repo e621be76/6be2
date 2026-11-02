@@ -1,0 +1,150 @@
+# migrated from ci/legacy.gitlab-ci.yml, see MIGRATION-NOTES.md for what changed and why
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - chart/**
+      - terraform/**
+      - .github/workflows/**
+      - .semgrepignore
+
+# least privilege by default, jobs widen it only where needed
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/quote-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: app/go.mod
+          cache: false # stdlib only, nothing to cache
+      - name: vet and test
+        working-directory: app
+        run: |
+          go vet ./...
+          go test -race ./...
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1
+      - name: lint chart
+        run: helm lint chart && helm template quote-api chart >/dev/null
+
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1
+      # semgrep can't parse helm templates, so scan what the chart actually renders
+      - name: render chart
+        run: helm template quote-api chart > rendered-chart.yaml
+      # --error makes any finding fail the job, unlike the legacy allow_failure sonar job
+      - name: semgrep
+        run: >
+          pipx run semgrep==1.183.0 scan --error --metrics=off
+          --config p/golang --config p/dockerfile --config p/github-actions --config p/kubernetes
+          . rendered-chart.yaml
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.1
+      - name: fmt, init, validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  image:
+    needs: [test, sast]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # immutable sha-<short> tag is what gets deployed; latest is only a convenience
+          # priority makes the sha tag the `version` output (raw tags outrank sha by default)
+          tags: |
+            type=sha,prefix=sha-,priority=1000
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: build for scan
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          load: true
+          tags: quote-api:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # release binary (checksum-pinned) instead of the alpine-based aquasec/trivy image or the hijacked trivy-action
+      - name: trivy (fail on fixable HIGH/CRITICAL)
+        env:
+          TRIVY_VERSION: 0.76.1
+          TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+        run: |
+          curl -fsSLo trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
+          tar -xzf trivy.tgz trivy
+          ./trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --no-progress quote-api:scan
+      - if: github.event_name == 'push'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build multi-arch and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  # GitOps replaces the legacy `kubectl set image`: CI only records the new tag in git, ArgoCD deploys it
+  bump-chart:
+    needs: [image, terraform]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: set image in chart/values.yaml
+        run: |
+          sed -i -E \
+            -e "s#^(  repository: ).*#\1${IMAGE}#" \
+            -e "s#^(  tag: ).*#\1${{ needs.image.outputs.tag }}#" \
+            chart/values.yaml
+          git diff --exit-code chart/values.yaml && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: deploy ${{ needs.image.outputs.tag }} [skip ci]"
+          git push

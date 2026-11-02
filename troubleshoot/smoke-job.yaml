@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoke-test
+  namespace: troubleshoot
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: smoke-client
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: curl
+          image: curlimages/curl:8.7.1
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              out=$(curl -fsS --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors --max-time 10 http://web-svc.troubleshoot.svc.cluster.local)
+              echo "$out"
+              echo "$out" | grep -q "TROUBLESHOOT-OK"

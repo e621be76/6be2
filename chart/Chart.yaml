@@ -1,0 +1,6 @@
+apiVersion: v2
+name: quote-api
+description: Random motivational quotes, placed spot-first with an on-demand anchor
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

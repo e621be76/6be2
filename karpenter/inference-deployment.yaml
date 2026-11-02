@@ -1,0 +1,56 @@
+# example workload showing what the pods must carry to use the pools above
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: ai
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+      annotations:
+        # Karpenter won't voluntarily disrupt (drift, expiry) a node while this pod runs on it
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      nodeSelector:
+        acme.io/node-type: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # spot gives a 2-minute notice; let in-flight requests finish within that window
+      terminationGracePeriodSeconds: 110
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/example/inference:1.0.0
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # model servers write caches; give them scratch space instead of a writable root filesystem
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 50Gi

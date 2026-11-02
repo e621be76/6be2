@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "quote-api.labels" . | nindent 4 }}
+spec:
+  # no replicas field: the HPA owns it, so ArgoCD doesn't fight the autoscaler
+  revisionHistoryLimit: 3
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: {{- include "quote-api.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "quote-api.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          # only the app nodepools: keeps us off the GPU node and the k3s server
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: acme.io/capacity
+                    operator: In
+                    values: [spot, on-demand]
+          # cost: when both pools are allowed, pick spot
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: acme.io/capacity
+                    operator: In
+                    values: [spot]
+      topologySpreadConstraints:
+        # availability: spot and on-demand counts may differ by at most 1, so with 3 replicas
+        # the 2nd one can't go to spot (2-0) and lands on on-demand -> 2 spot + 1 on-demand
+        # Honor drops cordoned/tainted nodes from the count, so a drained pool doesn't block scheduling
+        - maxSkew: 1
+          topologyKey: acme.io/capacity
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels: {{- include "quote-api.labels" . | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+        # spread across hosts, but soft: during a drain two replicas may share the surviving spot node
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels: {{- include "quote-api.labels" . | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+      containers:
+        - name: quote-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1

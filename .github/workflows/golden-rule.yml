@@ -1,0 +1,55 @@
+# the reviewer's exact steps on a clean machine: clone, `docker compose up -d`, `./scripts/run-all.sh`
+# uses only public inputs (this repo, GHCR images), so a green run here means the submission gate passes
+name: golden-rule
+
+on:
+  # after ci (incl. the image bump commit, which is [skip ci] and so can't trigger anything itself)
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  # harness changes don't trigger ci
+  push:
+    branches: [main]
+    paths:
+      - docker-compose.yml
+      - toolbox/**
+      - scripts/**
+      - cluster/**
+      - argocd/**
+      - troubleshoot/**
+      - karpenter/**
+      - .github/workflows/golden-rule.yml
+  # upstream drift (k3s image, helm charts, CRDs) breaks a clone that worked last week
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# one run at a time; the newest main is the only one worth testing
+concurrency:
+  group: golden-rule
+  cancel-in-progress: true
+
+jobs:
+  golden-rule:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # default branch HEAD, which is what a reviewer clones
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: docker compose up -d
+        run: docker compose up -d
+      - name: ./scripts/run-all.sh
+        run: ./scripts/run-all.sh
+      - name: diagnostics
+        if: failure()
+        run: |
+          docker compose logs toolbox | tail -100
+          docker compose exec -T toolbox kubectl get nodes -L acme.io/capacity -L acme.io/node-type || true
+          docker compose exec -T toolbox kubectl get pods -A -o wide || true
+          docker compose exec -T toolbox kubectl -n argocd get applications -o wide || true
+          docker compose exec -T toolbox kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true

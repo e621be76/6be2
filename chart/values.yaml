@@ -1,0 +1,27 @@
+# repository and tag are bumped by CI (.github/workflows/ci.yml) after each image push
+image:
+  repository: ghcr.io/e621be76/quote-api
+  tag: sha-0bbd12b
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+
+resources:
+  requests:
+    # measured ~57m per req/s under k6, so the 70% HPA target (350m) is ~6 req/s per pod
+    cpu: 500m
+    memory: 32Mi
+  limits:
+    cpu: 500m
+    memory: 64Mi
+
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  minAvailable: 2
+
+ingress:
+  className: traefik

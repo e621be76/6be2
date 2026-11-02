@@ -1,0 +1,9 @@
+# private working notes and the locally edited brief
+NOTES.md
+ASSIGNMENTS.md
+CLAUDE.md
+.terraform/
+*.tfstate*
+*.tfvars
+*.tfplan
+.env*
