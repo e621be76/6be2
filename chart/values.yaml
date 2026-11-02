@@ -1,7 +1,7 @@
 # repository and tag are bumped by CI (.github/workflows/ci.yml) after each image push
 image:
   repository: ghcr.io/e621be76/quote-api
-  tag: sha-0bbd12b
+  tag: sha-c090ace
   pullPolicy: IfNotPresent
 
 containerPort: 8080
